@@ -36,8 +36,7 @@ python train.py --dataset ShanghaiA
 
 # Testing
 
-You can download the pretrained model from [Baidu-Disk](链接：https://pan.baidu.com/s/1TIqgYdlDp6oa5kF16PKMMg 
-), passward:DSFO
+You can download the pretrained model from [Baidu-Disk](https://pan.baidu.com/s/1TIqgYdlDp6oa5kF16PKMMg), passward:DSFO
 
 ```
 python test.py --dataset ShanghaiA  --pre model_best.pth
