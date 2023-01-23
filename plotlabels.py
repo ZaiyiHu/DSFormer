@@ -1,0 +1,278 @@
+from __future__ import division
+import warnings
+import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
+from torchvision import transforms
+import dataset
+import math
+from utils import save_checkpoint, setup_seed
+import torch
+import os
+import logging
+import nni
+import numpy as np
+from nni.utils import merge_parameter
+from config import return_args, args
+from Networks.Shunted.shunted_models import base_patch4_384_gap
+from Networks.DSFormer import *
+from image import load_data
+import matplotlib.pyplot as plt
+
+warnings.filterwarnings('ignore')
+import time
+
+setup_seed(args.seed)
+
+logger = logging.getLogger('mnist_AutoML')
+
+
+def main(args):
+    if args['dataset'] == 'ShanghaiA':
+        train_file = './npydata/ShanghaiA_train.npy'
+        test_file = './npydata/ShanghaiA_test.npy'
+    elif args['dataset'] == 'ShanghaiB':
+        train_file = './npydata/ShanghaiB_train.npy'
+        test_file = './npydata/ShanghaiB_test.npy'
+    elif args['dataset'] == 'UCF_QNRF':
+        train_file = './npydata/ucf_qnrf_train.npy'
+        test_file = './npydata/ucf_qnrf_test.npy'
+    elif args['dataset'] == 'JHU':
+        train_file = './npydata/jhu_train.npy'
+        test_file = './npydata/jhu_val.npy'
+    elif args['dataset'] == 'NWPU':
+        train_file = './npydata/nwpu_train.npy'
+        test_file = './npydata/nwpu_val.npy'
+
+    with open(train_file, 'rb') as outfile:
+        train_list = np.load(outfile).tolist()
+    with open(test_file, 'rb') as outfile:
+        val_list = np.load(outfile).tolist()
+
+    print(len(train_list), len(val_list))
+
+    os.environ['CUDA_VISIBLE_DEVICES'] = args['gpu_id']
+
+    val_data = pre_data(train_list, args, train=True)
+    # test_data = pre_data(val_list, args, train=False)
+    train_label_list = []
+    for j in range(len(train_list)):
+        train_label_list.append(val_data[j]['gt_count'])
+    print(train_label_list)
+    density_list = density_level_classify_plot(train_label_list)
+    print(density_list)
+    wts = get_classifier_weights(density_list)
+    print(wts)
+    x = np.linspace(100, 1000, 10)
+    x = [str(a) for a in x]
+    y = density_level_classify_plot(train_label_list)
+    plt.xlabel('Density of images')
+    plt.ylabel('Number')
+    plt.title('Figs When PCC')
+    plt.bar(x, y, width=0.8, bottom=None, align='center', data=None, )
+    plt.show()
+
+
+def pre_data(train_list, args, train):
+    print("Pre_load dataset ......")
+    data_keys = {}
+    count = 0
+    for j in range(len(train_list)):
+        Img_path = train_list[j]
+        fname = os.path.basename(Img_path)
+        img, gt_count = load_data(Img_path, args, train)
+
+        blob = {}
+        blob['img'] = img
+        blob['gt_count'] = gt_count
+        blob['fname'] = fname
+        data_keys[count] = blob
+        count += 1
+
+        '''for debug'''
+        # if j> 10:
+        #     break
+    return data_keys
+
+
+def train(Pre_data, model, criterion, density_classify_loss, optimizer, epoch, args, scheduler):
+    losses = AverageMeter()
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+
+    train_loader = torch.utils.data.DataLoader(
+        dataset.listDataset(Pre_data, args['save_path'],
+                            shuffle=True,
+                            transform=transforms.Compose([
+                                transforms.ToTensor(),
+
+                                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                     std=[0.229, 0.224, 0.225]),
+                            ]),
+                            train=True,
+                            batch_size=args['batch_size'],
+                            num_workers=args['workers'],
+                            args=args),
+        batch_size=args['batch_size'], drop_last=False)
+    args['lr'] = optimizer.param_groups[0]['lr']
+    print('epoch %d, processed %d samples, lr %.10f' % (epoch, epoch * len(train_loader.dataset), args['lr']))
+
+    model.train()
+    end = time.time()
+
+    for i, (fname, img, gt_count) in enumerate(train_loader):
+
+        data_time.update(time.time() - end)
+        img = img.cuda()
+        out1, out2 = model(img)
+        gt_count = gt_count.type(torch.FloatTensor).cuda().unsqueeze(1)
+        gt_density_level = np.array(density_level_classify(gt_count.cpu())).astype(float)
+        gt_density_level = torch.from_numpy(gt_density_level).type(torch.FloatTensor).cuda()
+        # print(out1.shape, kpoint.shape)
+
+        loss1 = criterion(out1, gt_count)
+        out2 = torch.sigmoid(out2)
+        loss2 = density_classify_loss(out2, gt_density_level.type(torch.FloatTensor).cuda())
+        loss2_lamda = 0.1
+        loss = loss1 + loss2_lamda * loss2
+        losses.update(loss.item(), img.size(0))
+
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        optimizer.step()
+
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args['print_freq'] == 0:
+            print('4_Epoch: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                .format(
+                epoch, i, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses))
+    scheduler.step()
+
+
+def validate(Pre_data, model, args):
+    print('begin test')
+    batch_size = 1
+    test_loader = torch.utils.data.DataLoader(
+        dataset.listDataset(Pre_data, args['save_path'],
+                            shuffle=False,
+                            transform=transforms.Compose([
+                                transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                                                            std=[0.229, 0.224, 0.225]),
+
+                            ]),
+                            args=args, train=False),
+        batch_size=1)
+
+    model.eval()
+
+    mae = 0.0
+    mse = 0.0
+    visi = []
+    index = 0
+    for i, (fname, img, gt_count) in enumerate(test_loader):
+
+        img = img.cuda()
+        if len(img.shape) == 5:
+            img = img.squeeze(0)
+        if len(img.shape) == 3:
+            img = img.unsqueeze(0)
+        with torch.no_grad():
+
+            out1, out2 = model(img)
+            count = torch.sum(out1).item()
+
+        gt_count = torch.sum(gt_count).item()
+        mae += abs(gt_count - count)
+        mse += abs(gt_count - count) * abs(gt_count - count)
+
+        if i % 15 == 0:
+            print('{fname} Gt {gt:.2f} Pred {pred}'.format(fname=fname[0], gt=gt_count, pred=count))
+
+    mae = mae * 1.0 / (len(test_loader) * batch_size)
+    mse = math.sqrt(mse / (len(test_loader)) * batch_size)
+
+    nni.report_intermediate_result(mae)
+    print(' \n* MAE {mae:.3f}\n'.format(mae=mae), '* MSE {mse:.3f}'.format(mse=mse))
+
+    return mae
+
+
+def get_classifier_weights(density_list):
+    wts = torch.tensor(density_list)
+    wts = 1 - wts / (sum(wts))
+    wts = wts / sum(wts)
+    return wts
+
+
+# 0~3000 长尾分布
+# 1.统计SHHA数据集各阶段人群数量分布 尽量平缓 参考PCCNet的分类方式
+def density_level_classify(count):
+    total_res = []
+    for i in range(len(count)):
+        res = []
+        img_area = 384 * 384
+        max_count = 383 / img_area
+        t = count[i] / img_area / max_count
+        t = int(min(t, 9))
+        for j in range(10):
+            if t == j:
+                res.append(1)
+            else:
+                res.append(0)
+        total_res.append(res)
+    return total_res
+
+
+# [55, 68, 27, 10, 6, 11, 2, 2, 0, 1]
+def density_level_classify_plot(count):
+    total_res = []
+    count = np.array(count)
+    area = 384 * 384
+    print(max(count))
+    print(min(count))
+    gt_mid_count = (max(count) - min(count))
+    mid_val = gt_mid_count / area / 10
+    count = [int(a) for a in count]
+    for i in range(10):
+        total_res.append(0)
+    for i in range(len(count)):
+        t = count[i] / area / mid_val
+        t = int(min(t, 9))
+        total_res[t] += 1
+
+    return total_res
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+if __name__ == '__main__':
+    tuner_params = nni.get_next_parameter()
+    logger.debug(tuner_params)
+    params = vars(merge_parameter(return_args, tuner_params))
+    print(params)
+
+    main(params)
