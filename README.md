@@ -42,4 +42,6 @@ You can download the pretrained model from [Baidu-Disk](https://pan.baidu.com/s/
 python test.py --dataset ShanghaiA  --pre model_best.pth
 ```
 
+# Acknowledgement
+This code is heavily built on [TransCrowd](https://github.com/dk-liang/TransCrowd). We sincerely thank the authors for sharing the codes.
 
