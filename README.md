@@ -42,6 +42,20 @@ You can download the pretrained model from [Baidu-Disk](https://pan.baidu.com/s/
 python test.py --dataset ShanghaiA  --pre model_best.pth
 ```
 
+## Citation
+You may consider kindly citing our work if you find this useful. Great thanks!
+
+``` bibtex
+@inproceedings{hu2023densitytoken,
+  title={Densitytoken: Weakly-Supervised Crowd Counting with Density Classification},
+  author={Hu, Zaiyi and Wang, Binglu and Li, Xuelong},
+  booktitle={ICASSP 2023-2023 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+  pages={1--5},
+  year={2023},
+  organization={IEEE}
+}
+```
+
 # Acknowledgement
 This code is heavily built on [TransCrowd](https://github.com/dk-liang/TransCrowd). We sincerely thank the authors for sharing the codes.
 
