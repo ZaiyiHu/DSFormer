@@ -1,5 +1,5 @@
 # DensityToken: Weakly-Supervised Crowd Counting with Density Classification
-* This repository is the official implementation of our method DSFormer(Dual Supervision Transformer). In this work, we propose a transformer-based weakly-supervised crowd counting framework with density tokens to perform density classification.
+* This repository is the official implementation of our method DSFormer(Dual Supervision Transformer) in ICASSP 2023. In this work, we propose a transformer-based weakly-supervised crowd counting framework with density tokens to perform density classification.
 
 ## Overview
 ![avatar](./framework.jpg)
